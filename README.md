@@ -111,13 +111,205 @@ sudo systemctl restart haproxy
 sudo systemctl status haproxy
 ```
 
+### 6. Birden Fazla Ülkeye İzin Verme
+Sistem, varsayılan olarak yalnızca Türkiye IP’lerine izin verir. Ancak, birden fazla ülkeye (örneğin, Türkiye, ABD, İngiltere) izin vermek için aşağıdaki adımları izleyin:
+
+#### 6.1 Python Scriptini Güncelleyin
+`convert_ip2location.py` dosyasını, istenen ülkelerin IP aralıklarını bir map dosyasına (`allowed-ip-list.map`) yazacak şekilde düzenleyin:
+
+1. Scripti düzenleyin:
+   ```bash
+   nano /root/convert_ip2location.py
+   ```
+2. Aşağıdaki içeriği kullanın:
+   ```python
+   import csv
+   import ipaddress
+   import sys
+
+   input_file = "/etc/haproxy/IP2LOCATION-LITE-DB1.CSV"
+   output_file = "/etc/haproxy/allowed-ip-list.map"
+   allowed_countries = ['TR', 'US', 'UK']  # İzin verilecek ülkeler
+
+   def int_to_ip(ip_int):
+       try:
+           return str(ipaddress.IPv4Address(int(ip_int)))
+       except ValueError as e:
+           print(f"Hata: Geçersiz IP sayısı - {ip_int}: {e}")
+           sys.exit(1)
+
+   print(f"[{sys.argv[0]}] Başladı: CSV dosyası ({input_file}) işleniyor...")
+
+   try:
+       with open(input_file, "r") as csv_file, open(output_file, "w") as map_file:
+           reader = csv.reader(csv_file)
+           count = 0
+           for row in reader:
+               if len(row) < 4:
+                   print(f"Uyarı: Geçersiz CSV satırı: {row}")
+                   continue
+               ip_from, ip_to, country_code, country_name = row
+               if country_code in allowed_countries:
+                   try:
+                       start_ip = int_to_ip(ip_from)
+                       end_ip = int_to_ip(ip_to)
+                       networks = ipaddress.summarize_address_range(ipaddress.IPv4Address(start_ip), ipaddress.IPv4Address(end_ip))
+                       for net in networks:
+                           map_file.write(f"{net}\n")
+                           count += 1
+                   except ValueError as e:
+                       print(f"Hata: IP aralığı dönüştürülemedi ({ip_from}-{ip_to}): {e}")
+           print(f"[{sys.argv[0]}] Başarıyla tamamlandı: {count} IP aralığı {output_file} dosyasına yazıldı.")
+   except FileNotFoundError as e:
+       print(f"Hata: {input_file} dosyası bulunamadı: {e}")
+       sys.exit(1)
+   except Exception as e:
+       print(f"Hata: Beklenmeyen hata oluştu: {e}")
+       sys.exit(1)
+   ```
+3. Scripti test edin:
+   ```bash
+   python3 /root/convert_ip2location.py
+   head /etc/haproxy/allowed-ip-list.map
+   ```
+   **Beklenen Çıktı**:
+   ```
+   2.16.150.0/23
+   3.0.0.0/15
+   ...
+   ```
+
+#### 6.2 HAProxy Yapılandırmasını Güncelleyin
+`haproxy.cfg` dosyasını, yeni map dosyasını (`allowed-ip-list.map`) kullanacak şekilde düzenleyin:
+
+1. Dosyayı düzenleyin:
+   ```bash
+   nano /etc/haproxy/haproxy.cfg
+   ```
+2. Şu satırları:
+   ```haproxy
+   acl is_turkey_ip src -f /etc/haproxy/tr-ip-list.map
+   http-request return status 403 content-type text/html file /etc/haproxy/errors/403-turkey-only.html if !is_turkey_ip
+   ```
+   Şununla değiştirin:
+   ```haproxy
+   acl is_allowed_ip src -f /etc/haproxy/allowed-ip-list.map
+   http-request return status 403 content-type text/html file /etc/haproxy/errors/403-blocked.html if !is_allowed_ip
+   ```
+3. Yeni bir hata sayfası oluşturun (isteğe bağlı):
+   ```bash
+   echo '<html><body><h1>403 Forbidden</h1><p>Bu siteye yalnızca belirli ülkelerden erişilebilir.</p></body></html>' | sudo tee /etc/haproxy/errors/403-blocked.html
+   ```
+4. Yapılandırmayı test edin ve HAProxy’yi yeniden yükleyin:
+   ```bash
+   sudo haproxy -c -f /etc/haproxy/haproxy.cfg
+   sudo systemctl reload haproxy
+   ```
+
+#### 6.3 Cron Betiğini Güncelleyin
+`update-ip2location.sh` dosyasını, yeni map dosyasını (`allowed-ip-list.map`) kontrol edecek şekilde güncelleyin:
+
+1. Betiği düzenleyin:
+   ```bash
+   nano /etc/cron.weekly/update-ip2location
+   ```
+2. Aşağıdaki içeriği kullanın:
+   ```bash
+   #!/bin/bash
+   # /etc/cron.weekly/update-ip2location
+   set -e  # Hata durumunda betiği durdur
+   LOG_FILE="/var/log/update-ip2location.log"
+
+   echo "$(date): Betik başladı" >> "$LOG_FILE"
+
+   # ZIP dosyasını indir
+   wget -O /etc/haproxy/IP2LOCATION-LITE-DB1.CSV.zip "https://www.ip2location.com/download?token=[YOUR_TOKEN]&file=DB1LITE" 2>> "$LOG_FILE"
+   if [ $? -ne 0 ]; then
+       echo "$(date): ZIP dosyası indirilemedi" >> "$LOG_FILE"
+       exit 1
+   fi
+
+   # ZIP dosyasını aç
+   unzip -o /etc/haproxy/IP2LOCATION-LITE-DB1.CSV.zip -d /etc/haproxy/ 2>> "$LOG_FILE"
+   if [ $? -ne 0 ]; then
+       echo "$(date): ZIP dosyası açılamadı" >> "$LOG_FILE"
+       exit 1
+   fi
+
+   # Python scriptini çalıştır
+   python3 /root/convert_ip2location.py 2>> "$LOG_FILE"
+   if [ $? -ne 0 ]; then
+       echo "$(date): Python scripti başarısız oldu" >> "$LOG_FILE"
+       exit 1
+   fi
+
+   # Map dosyasını kontrol et
+   if [ ! -s /etc/haproxy/allowed-ip-list.map ]; then
+       echo "$(date): Map dosyası oluşturulmadı veya boş" >> "$LOG_FILE"
+       exit 1
+   fi
+
+   # Dosya izinlerini güncelle
+   chmod 644 /etc/haproxy/allowed-ip-list.map >> "$LOG_FILE" 2>&1
+   chown haproxy:haproxy /etc/haproxy/allowed-ip-list.map >> "$LOG_FILE" 2>&1
+
+   # HAProxy’yi yeniden yükle
+   systemctl reload haproxy >> "$LOG_FILE" 2>&1
+   if [ $? -ne 0 ]; then
+       echo "$(date): HAProxy yeniden yüklenemedi" >> "$LOG_FILE"
+       exit 1
+   fi
+
+   echo "$(date): Betik başarıyla tamamlandı" >> "$LOG_FILE"
+   ```
+3. Betiği test edin:
+   ```bash
+   /etc/cron.weekly/update-ip2location
+   cat /var/log/update-ip2location.log
+   ```
+
+#### 6.4 Ülke Kodlarını Özelleştirme
+`allowed_countries` listesini dilediğiniz ülkelerle güncelleyin. Örneğin:
+- Türkiye: `TR`
+- Amerika: `US`
+- İngiltere: `UK`
+- Almanya: `DE`
+- Japonya: `JP`
+
+Ülke kodlarını [IP2Location’un ülke kodları listesinden](https://www.ip2location.com/country-code) alabilirsiniz. Örneğin:
+```python
+allowed_countries = ['TR', 'US', 'UK', 'DE', 'JP']
+```
+
+#### 6.5 Test Etme
+Sistemi test etmek için:
+1. Güncellenmiş scripti çalıştırın:
+   ```bash
+   python3 /root/convert_ip2location.py
+   ```
+2. Map dosyasını kontrol edin:
+   ```bash
+   head /etc/haproxy/allowed-ip-list.map
+   ```
+3. VPN kullanarak izin verilen ülkelerden (örneğin, TR, US, UK) ve izin verilmeyen ülkelerden bağlanmayı deneyin. İzin verilmeyen ülkeler için 403 hata sayfası görmelisiniz.
+
+## Sistem Akışı
+Aşağıdaki diyagram, sistemin HTTP isteklerini nasıl işlediğini gösterir:
+```mermaid
+graph TD
+    A[İstemci: test.com'a İstek] --> B[HAProxy]
+    B -->|IP Kontrolü| C{IP2Location Map Dosyası}
+    C -->|İzin Verilen Ülke| D[Backend]
+    C -->|Diğer Ülkeler| E[403 Hata Sayfası]
+```
+
 ## Dosyalar
 - **`haproxy.cfg`**: HAProxy yapılandırması. Türkiye IP’lerini kontrol eder ve diğerlerini engeller.
-- **`convert_ip2location.py`**: IP2Location CSV dosyasını CIDR formatında `/etc/haproxy/tr-ip-list.map` dosyasına dönüştürür.
+- **`convert_ip2location.py`**: IP2Location CSV dosyasını CIDR formatında `/etc/haproxy/tr-ip-list.map` veya `/etc/haproxy/allowed-ip-list.map` dosyasına dönüştürür.
 - **`update-ip2location.sh`**: Veritabanını indirir, açar, dönüştürür ve HAProxy’yi yeniden yükler.
 
 ## Kullanım Senaryoları
-- **Web Sitesi Kısıtlaması**: Türkiye dışından gelen istekleri engelleyerek yalnızca yerel kullanıcılara hizmet sunar.
+- **Web Sitesi Kısıtlaması**: Türkiye veya seçilen ülkeler dışından gelen istekleri engelleyerek yalnızca belirli kullanıcılara hizmet sunar.
 - **Güvenlik**: Kötü niyetli User-Agent’ları (örneğin, `sqlmap`, `curl/7.0`, `wget`) engeller.
 - **Otomasyon**: IP veritabanını düzenli olarak güncelleyerek manuel müdahaleyi ortadan kaldırır.
 
@@ -156,3 +348,10 @@ Bu proje [MIT lisansı](LICENSE) altında dağıtılmaktadır. Ancak, IP2Locatio
 - **IP2Location Kısıtlamaları**: Veritabanı aylık indirilebilir. Kota aşımı durumunda [IP2Location](https://lite.ip2location.com/)’dan yeni token alın.
 - **IPv6 Desteği**: IPv6 için `DB1LITEIPV6` dosyasını kullanabilirsiniz. `convert_ip2location.py` dosyasını buna göre güncelleyin.
 - **Performans**: Büyük map dosyaları için HAProxy’nin bellek kullanımını izleyin (`stick-table size 1m` genellikle yeterlidir).
+
+## Katkıda Bulunma
+- Hatalar veya öneriler için bir [issue](https://github.com/kullanici_adi/haproxy-ip2location-turkey-filter/issues) açın.
+- Yeni özellikler için [pull request](https://github.com/kullanici_adi/haproxy-ip2location-turkey-filter/pulls) gönderin.
+
+## İletişim
+Sorularınız için [GitHub Issues](https://github.com/kullanici_adi/haproxy-ip2location-turkey-filter/issues) üzerinden iletişime geçebilirsiniz.
