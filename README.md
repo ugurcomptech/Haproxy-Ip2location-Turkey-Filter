@@ -349,9 +349,3 @@ Bu proje [MIT lisansı](LICENSE) altında dağıtılmaktadır. Ancak, IP2Locatio
 - **IPv6 Desteği**: IPv6 için `DB1LITEIPV6` dosyasını kullanabilirsiniz. `convert_ip2location.py` dosyasını buna göre güncelleyin.
 - **Performans**: Büyük map dosyaları için HAProxy’nin bellek kullanımını izleyin (`stick-table size 1m` genellikle yeterlidir).
 
-## Katkıda Bulunma
-- Hatalar veya öneriler için bir [issue](https://github.com/kullanici_adi/haproxy-ip2location-turkey-filter/issues) açın.
-- Yeni özellikler için [pull request](https://github.com/kullanici_adi/haproxy-ip2location-turkey-filter/pulls) gönderin.
-
-## İletişim
-Sorularınız için [GitHub Issues](https://github.com/kullanici_adi/haproxy-ip2location-turkey-filter/issues) üzerinden iletişime geçebilirsiniz.
